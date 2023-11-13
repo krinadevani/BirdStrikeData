@@ -1,0 +1,619 @@
+---
+title: "Practicum I CS5200"
+author: "Krina Devani (devani.k@northeastern.edu), Sarthak Kagliwal (kagliwal.s@northeastern.edu)"
+date: "Spring 2023"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+
+##Connect to Database
+This Practicum will use a local instance of MySQL. This database is very easy to set up and with minimal configuration or management.
+To connect the database, we are using 'dbConnect()' function which takes in the username, password and database configurations.
+
+```{r dbConnectBlock, eval = T, warning = F}
+
+# 1. Library 
+library(RMySQL)
+library(DBI)
+library(sqldf)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(tinytex)
+
+# 2. Settings
+db_user <- 'root'
+db_password <- 'Bkjbkz@403'
+db_name <- 'dbtest'
+db_host <- '127.0.0.1' 
+db_port <- 3306 
+
+# 3. Connect to DB
+mydb <-  dbConnect(MySQL(), user = db_user, password = db_password,
+                 dbname = db_name, host = db_host, port = db_port)
+
+```
+
+
+To check if the database connection is successful. 
+Returns TRUE if connected successfully, otherwise FALSE.
+```{r testDbConnection, eval = T, warning = F}
+dbIsValid(mydb)
+```
+
+
+##Create Database
+
+#4A. Create table incidents
+This table will stores wildlife strike incidents.
+
+```{sql dropIncidentsTable, connection=mydb}
+
+DROP TABLE IF EXISTS incidents;
+
+```
+
+Writing the 'incidents' table schema.
+Here rid is the primary key. 
+'origin' is a Foreign key(FK) which refrences the airport table.
+'airline' is a Foreign key(FK) which refrences the airline table.
+'conditions' is a Foreign key(FK) which refrences the conditions table.
+'flight.phase' is a value from the value set ("takeoff", "landing", "inflight", "unknown")
+```{sql createIncidentsTable, connection=mydb}
+
+CREATE TABLE incidents(
+  rid INTEGER NOT NULL  PRIMARY KEY,
+  `dep.date` DATE NULL,
+  origin INTEGER NULL,
+  airline INTEGER NULL,
+  aircraft TEXT NULL,
+  `flight.phase` SET ("takeoff", "landing", "inflight", "unknown") NOT NULL DEFAULT 'unknown',
+  altitude INTEGER NULL,
+  conditions VARCHAR(255) NULL,
+  warned BOOLEAN NOT NULL DEFAULT FALSE,
+  CHECK(altitude >= 0)
+)
+
+```
+
+
+#4B. Create table airports
+This table will stores airport name, airport code and states.
+
+```{sql dropAirportsTable, connection=mydb}
+
+DROP TABLE IF EXISTS airports;
+
+```
+
+
+Writing the 'airports' table schema.
+Here aid is the primary key. 
+```{sql createAirportsTable, connection=mydb}
+
+CREATE TABLE airports(
+  aid INTEGER NOT NULL PRIMARY KEY AUTO_INCREMENT,
+  airportName TEXT NOT NULL,
+  airportCode TEXT NULL,
+  state TEXT
+)
+
+```
+
+
+#4C. Setup origin foreign key
+Given chunk will link the incidents and airports tables via the origin foreign key in incidents to the primary key aid in airports.
+
+```{sql addFkOriginBlock, connection=mydb}
+
+ALTER TABLE incidents ADD CONSTRAINT airports_origin_fkey FOREIGN KEY (origin) REFERENCES airports(aid);
+
+```
+
+
+#4D. Create lookup table conditions
+This table will link incidents table with conditions foreign key.
+
+```{sql dropConditionsTable, connection=mydb}
+
+DROP TABLE IF EXISTS conditions;
+
+```
+
+Writing the 'conditions' table schema.
+Here cid is the primary key. 
+Each condition value in a row is unique.
+```{sql createConditionsTable, connection=mydb}
+
+CREATE TABLE conditions(
+  cid INTEGER NOT NULL PRIMARY KEY AUTO_INCREMENT,
+  `condition` VARCHAR(255) NOT NULL,
+  explanation TEXT NULL,
+  UNIQUE (`condition`)
+)
+
+```
+
+Make conditions column a foreign key.
+```{sql alterConditionsToInt, connection=mydb}
+
+ALTER TABLE incidents MODIFY conditions INTEGER;
+
+```
+
+
+Given chunk will link the incidents and conditions tables via the conditions foreign key in incidents to the primary key cid in condtions.
+```{sql addFkConditionsBlock, connection=mydb}
+
+ALTER TABLE incidents ADD CONSTRAINT conditions_fkey FOREIGN KEY (conditions) REFERENCES conditions(cid);
+
+```
+
+
+#4E. Create table airlines
+This table will stores airlines name, airlines code and flag.
+
+```{sql dropAirlinesTable, connection=mydb}
+DROP TABLE IF EXISTS airlines;
+```
+
+
+Writing the 'airlines' table schema.
+Here eid is the primary key. 
+```{sql createAirlineTable, connection=mydb}
+CREATE TABLE airlines(
+  eid INTEGER NOT NULL PRIMARY KEY AUTO_INCREMENT,
+  airlineName TEXT NOT NULL,
+  airlineCode TEXT NULL,
+  flag TEXT NULL
+)
+```
+
+
+#4F. Setup origin foreign key
+Given chunk will link the incidents and airlines tables via the airline foreign key in incidents to the primary key eid in airlines.
+
+```{sql addFkAirlineBlock, connection=mydb}
+
+ALTER TABLE incidents ADD CONSTRAINT airports_airlines_fkey FOREIGN KEY (airline) REFERENCES airlines(eid);
+
+```
+
+
+This chunk will be used to test the table definitions.
+```{r evaluateTableDef, eval = F, warning = F}
+
+dbGetQuery(mydb, "DESC incidents")
+dbGetQuery(mydb, "DESC airports")
+dbGetQuery(mydb, "DESC conditions")
+dbGetQuery(mydb, "DESC airlines")
+
+```
+
+
+##Load CSV data
+
+#Load CSV file into the dataframe
+Given chunk will load data from given BirdStrikesData-V2.csv to the bds.raw dataframe.
+
+```{r loadCSVToDataframe, eval = T, warning = F}
+bds.raw <- read.csv("BirdStrikesData-V2.csv", stringsAsFactors = FALSE)
+```
+
+
+To Check if the csv file is loaded in the dataframe.
+```{r populateDataframe, eval = T, warning = F}
+head(bds.raw)
+```
+
+Map the flight phase given in the csv to the value set.
+```{r mapFlightPhase, eval = T, warning = F}
+
+x <- c("Parked","Taxi","Take-off run","Climb", "Approach", "Descent", "Landing Roll","")
+y <- c("unknown","unknown","takeoff","takeoff","inflight","landing","landing","unknown")
+bds.raw$flight_phase <- mapvalues(bds.raw$flight_phase, 
+          from=x, 
+          to=y)
+
+```
+
+Set default value to flight date.
+```{r setDefalutToFlightDate, eval = T, warning = F}
+
+bds.raw$flight_date[bds.raw$flight_date == "" | bds.raw$flight_date == "N/A" | bds.raw$flight_date == "UNKNOWN" | is.na(bds.raw$flight_date) == TRUE ] <- "1/1/2000 0:00"
+
+```
+
+
+Set default value to airport & origin and get their distinct value and store the values in a subset of bds.raw dataframe 'view1'.
+```{r setDefaultToAirportOrigin, eval = T, warning = F}
+
+view1 <- distinct(bds.raw[,c(3,10)],.keep_all=TRUE)
+view1$airport[view1$airport == "" | view1$airport == "N/A" | view1$airport == "UNKNOWN" | is.na(view1$airport) == "TRUE"] <- "unknown" 
+view1$origin[view1$origin == "" | view1$origin == "N/A" | view1$origin == "UNKNOWN" | is.na(view1$origin) == "TRUE"] <- "unknown"
+view1
+
+```
+
+
+#Load data to airports table
+Given chunk will load data from data frame to airports table.
+
+```{r loadAiportTable, eval = T, warning = F}
+
+query <- paste0("INSERT INTO airports (airportName, state) VALUES ", 
+                paste(sprintf('("%s", "%s")', view1$airport, view1$origin), 
+                      collapse = ","))
+
+dbGetQuery(mydb, query)
+
+```
+
+
+Updating the view1 dataframe with the data stored in the airport table with its primary key.
+```{r updateView1, eval = T, warning = F}
+
+view1 <- dbGetQuery(mydb,"SELECT aid, airportName AS airport, state as stateVal FROM airports")
+```
+
+Testing the view1 dataframe.
+```{r testView1, eval = T, warning=F}
+head(view1)
+```
+
+
+Set default value to airline and get its distinct value and store the values in a subset of bds.raw dataframe 'view2'.
+```{r setDefaultToAirline, eval = T, warning = F}
+
+view2 <- distinct(bds.raw['airline'],.keep_all=TRUE)
+view2$airline[view2$airline == "" | view2$airline == "N/A" | view2$airline == "UNKNOWN" | is.na(view2$airline) == "TRUE"] <- "unknown" 
+view2
+
+```
+
+
+#Load data to airlines table
+Given chunk will load data from data frame to airlines table.
+
+```{r loadAirlinesTable, eval = T, warning = F}
+
+query <- paste0("INSERT INTO airlines (airlineName) VALUES ", 
+                paste(sprintf('("%s")', view2$airline), 
+                      collapse = ","))
+
+dbExecute(mydb, query)
+
+```
+Updating the view2 dataframe with the data stored in the airlines table with its primary key.
+```{r updateView2, eval = T, warning = F}
+
+view2 <- dbGetQuery(mydb,"SELECT eid, airlineName AS airline FROM airlines")
+
+```
+
+Testing the view2 dataframe.
+```{r testView2, eval = T, warning=F}
+
+head(view2)
+
+```
+
+
+Get distinct value of sky conditions.
+```{r}
+
+view3 <- distinct(bds.raw["sky_conditions"],.keep_all = TRUE)
+view3
+
+```
+
+
+#Load data to conditions table
+Given chunk will load data from data frame to conditions table.
+
+```{r loadConditionsTable, eval = T, warning = F}
+
+query <- paste0("INSERT INTO conditions (`condition`) VALUES ", 
+                paste(sprintf("('%s')", view3$sky_conditions), 
+                      collapse = ","))
+
+dbExecute(mydb, query)
+
+```
+Updating the view3 dataframe with the data stored in the conditions table with its primary key.
+```{r  updateView3, eval = T, warning = F}
+
+view3 <- dbGetQuery(mydb,"SELECT cid,`condition` AS sky_conditions FROM conditions")
+
+```
+
+Testing the view3 dataframe.
+```{r testView3, eval = T, warning=F}
+head(view3)
+```
+
+Make default unknown when airport and origin is empty.
+```{r createDemoDataframe, eval = T, warning = F}
+
+demo<- bds.raw
+demo$airport[demo$airport == "" | demo$airport == "N/A" | demo$airport == "UNKNOWN" | is.na(demo$airport) == "TRUE"] <- "unknown" 
+demo$origin[demo$origin == "" | demo$origin == "N/A" | demo$origin == "UNKNOWN" | is.na(demo$origin) == "TRUE"] <- "unknown"
+unique(demo$airport[demo$airport == "unknown"])
+
+```
+
+Apply left joins on view1, view2 and view3 and create new dataframe temp.
+```{r makeDfUsingJoins, eval = T, warning = F}
+
+temp <-left_join(left_join(left_join(demo,view1,by = c('airport', 'origin'='stateVal')),view2, by = "airline"),view3, by = "sky_conditions")
+temp
+```
+
+Create a new dataframe 'view4' that contains data and columns related to incidents table.
+```{r formatFlightDate, eval = T, warning = F}
+
+view4 <- temp[,c(1,7,20,21,2,11,18,22,17)]
+
+view4$flight_date <- gsub('-', '/', view4$flight_date)
+view4$flight_date <- as.Date(view4$flight_date, "%m/%d/%y")
+
+view4
+```
+
+
+#Load data to incidents table
+Given chunk will load data from data frame to incidents table.
+
+```{r loadIncidentsTable, eval = T, warning = F}
+
+query <- paste0("INSERT INTO incidents (rid, `dep.date`, origin, airline, aircraft, `flight.phase`, altitude, `conditions`, warned) VALUES ", 
+                paste(sprintf("('%s', NULLIF('%s', 'NA'), NULLIF('%d', 'NA'), NULLIF('%d', 'NA'),'%s', '%s', NULLIF('%s', 'NA'), NULLIF('%d', 'NA'), '%d')",
+                              view4$rid, view4$flight_date, view4$aid, view4$eid, view4$aircraft, view4$flight_phase, as.numeric(gsub(",", "", view4$altitude_ft)), view4$cid, ifelse(view4$pilot_warned_flag == 'Y', TRUE, FALSE)),
+                      collapse = ","))
+
+
+dbExecute(mydb, query)
+
+```
+
+
+#Display data loaded in the table
+
+Display incidents table data
+```{r displayIncidentsData, eval = T, warning = F}
+
+query <- "SELECT * FROM incidents LIMIT 10"
+dbGetQuery(mydb, query)
+
+```
+
+
+Display airports table data
+```{r displayAirportsData, eval = T, warning = F}
+
+query <- "SELECT * FROM airports LIMIT 10"
+dbGetQuery(mydb, query)
+
+```
+
+Display airlines table data
+```{r displayAirlinesData, eval = T, warning = F}
+
+query <- "SELECT * FROM airlines LIMIT 10"
+dbGetQuery(mydb, query)
+
+```
+
+Display conditions table data
+```{r displayConditionsData, eval = T, warning = F}
+
+query <- "SELECT * FROM conditions LIMIT 10"
+dbGetQuery(mydb, query)
+
+```
+
+
+##Queries
+
+#8 
+SQL query to find 10 states with the greatest number of incidents.
+
+```{sql findStateWithIncidents, connection=mydb}
+
+SELECT 
+  ar.state, 
+  COUNT(*) NoOfIncidents 
+FROM incidents AS i 
+LEFT JOIN airports AS ar 
+  ON i.origin = ar.aid 
+  GROUP BY ar.state 
+ORDER BY NoOfIncidents DESC 
+LIMIT 10
+
+```
+
+
+#9
+SQL query against your database to find the airlines that had an above average number bird strike incidents
+
+```{sql getAirlineAboveAvgIncidents, connection=mydb}
+
+SELECT 
+  ai.airlineName, 
+  COUNT(*) NoOfIncidents
+FROM incidents AS i
+LEFT JOIN airlines AS ai 
+  ON i.airline = ai.eid
+  GROUP BY ai.airlineName
+HAVING NoOfIncidents > (
+    SELECT 
+      AVG(NoOfIncidents)
+    FROM (
+    SELECT 
+      ai.airlineName, 
+      COUNT(*) NoOfIncidents
+    FROM incidents AS i
+    LEFT JOIN airlines AS ai
+        ON i.airline = ai.eid
+        GROUP BY ai.airlineName
+    )AS av
+)
+ORDER BY NoOfIncidents DESC
+
+```
+
+
+#10
+Create a SQL query against your database to find the number of bird strike incidents by month and by flight phase (across all years).
+
+```{r getIncidentsByMonthAndPhase, eval = T, warning = F}
+
+query <-"SELECT MONTH(i.`dep.date`) AS Month, i.`flight.phase` AS flightPhase, COUNT(*) NoOfIncidents FROM incidents AS i GROUP BY MONTH(i.`dep.date`), i.`flight.phase` ORDER BY Month, NoOfIncidents;"
+
+dVal <- dbGetQuery(mydb,query)
+head(dVal)
+
+```
+
+
+#11
+Scatter plot that plots month along the x-axis versus number of incidents.
+
+```{r scatterPlot, eval = T, warning = F}
+
+sumDf <- aggregate(dVal['NoOfIncidents'], list(Month = dVal$Month),sum)
+plot(sumDf$Month,
+     sumDf$NoOfIncidents, 
+     xlab = "Months", 
+     ylab = "No of incidents", 
+     main = "Bird strike incidents by month",
+     pch = 16,
+     label = sumDf$NoOfIncidents,
+)
+legend("topleft",
+      legend = c("NoOfIncidents"),
+      col = c(rgb(0,0,0)),
+      pch = c(16),
+      inset = c(0.1)
+      )
+text(sumDf$Month,
+     sumDf$NoOfIncidents+100, labels=sumDf$NoOfIncidents)
+
+```
+
+
+#12
+Given stored procedure will add a new incident to the database.
+
+```{sql dropSPAddNewIncident, connection=mydb}
+DROP PROCEDURE SPAddNewIncident;
+```
+
+```{sql sPAddNewIncident, connection=mydb}
+
+CREATE PROCEDURE SPAddNewIncident(
+  nRid INTEGER,
+  nDepDate DATE,
+  nAirport TEXT,
+  nOrigin TEXT,
+  nAirline TEXT,
+  nAircraft TEXT,
+  nPhase TEXT,
+  nConditions TEXT,
+  nAltitude INTEGER,
+  nWarned BOOLEAN
+)
+BEGIN
+
+DECLARE naid INT DEFAULT 0;
+DECLARE neid INT DEFAULT 0;
+DECLARE ncid INT DEFAULT 0;
+
+IF (ISNULL(nRid))
+THEN
+SIGNAL SQLSTATE '42601'
+SET MESSAGE_TEXT = 'rid can not be null!';
+END IF;
+
+IF (nAltitude < 0)
+THEN
+SIGNAL SQLSTATE '42601'
+SET MESSAGE_TEXT = 'altitude can not be negative!';
+END IF;
+
+IF (nPhase not in ("takeoff", "landing", "inflight", "unknown"))
+THEN
+SIGNAL SQLSTATE '42601'
+SET MESSAGE_TEXT = 'phase is incorrect!';
+END IF;
+
+
+IF (nAltitude >= 0)
+THEN
+  
+    SET naid = (SELECT aid FROM airports WHERE airportName = nAirport AND state = nOrigin);
+    IF (ISNULL(naid))
+    THEN 
+    
+      INSERT INTO airports (airportName, state) VALUES (nAirport, nOrigin);
+      SET naid = (SELECT aid FROM airports WHERE airportName = nAirport AND state = nOrigin);
+      
+    END IF;
+    
+    
+    SET neid = (SELECT eid FROM airlines WHERE airlineName = nAirline);
+    IF (ISNULL(neid))
+    THEN 
+    
+      INSERT INTO airlines (airlineName) VALUES (nAirline);
+      SET neid = (SELECT eid FROM airlines WHERE airlineName = nAirline);
+      
+    END IF;
+  
+    
+    SET ncid = (SELECT cid FROM conditions WHERE `condition` = nConditions);
+    
+    INSERT INTO incidents (rid, `dep.date`, origin, airline, aircraft, `flight.phase`, altitude, `conditions`, warned)
+    VALUES
+    (nRid, nDepDate, naid, neid, nAircraft, nPhase, nAltitude, ncid, nWarned);
+    
+END IF;
+  
+END
+
+```
+
+
+Using the stored procedure 'SPAddNewIncident' to add a new incident.
+```{sql testSPAddNewIncident,connection=mydb}
+CALL SPAddNewIncident(11, '1997-06-10','LAGUARDIA NY', 'NY', 'AMERICAN AIRLINES', 'Airplane', 'unknown', 'No Cloud', 50, TRUE);
+```
+
+Checking if the Stored procedure worked correctly.
+```{sql checkSP ,connection=mydb}
+
+select * from incidents where rid = 11
+
+```
+
+Test stored procedure if provided rid is null.
+It will raise concern while adding new data.
+```{sql testSPRidNull,connection=mydb}
+CALL SPAddNewIncident(null, '1997-06-10','LAGUARDIA NY', 'NY', 'AMERICAN AIRLINES', 'Airplane', 'unknown', 'No Cloud', 50, TRUE);
+```
+
+##Disconnect to Database
+```{r dbDisconnectBlock, eval = T, warning = F}
+
+# Disconnect database connection
+dbDisconnect(mydb)
+
+```
+
+
+
+
