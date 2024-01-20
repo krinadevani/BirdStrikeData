@@ -1,7 +1,7 @@
 # BirdStrikeData
 
 ## Overview
-This document provides the code for a Practicum project in CS5200, Spring 2023. The project involves setting up a local MySQL database, creating tables for wildlife strike incidents, airports, airlines, and conditions. It also includes loading data from a CSV file into the tables, running SQL queries, and implementing a stored procedure for adding new incidents.
+The project involves setting up a local MySQL database, and creating tables for wildlife strike incidents, airports, airlines, and conditions. It also includes loading data from a CSV file into the tables, running SQL queries, and implementing a stored procedure for adding new incidents.
 
 ## Instructions
 
